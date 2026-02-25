@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# name: discourse-no-likes
+# name: Dislike
 # about: Phantom reactions in selected categories — visible in UI, zero stat impact
 # meta_topic_id: TODO
 # version: 0.2.0
@@ -11,7 +11,7 @@
 enabled_site_setting :discourse_no_likes_enabled
 
 module ::DiscourseNoLikes
-  PLUGIN_NAME = "discourse-no-likes"
+  PLUGIN_NAME = "Dislike"
 
   # SQL: count real likes received by a user, excluding restricted categories
   LIKES_RECEIVED_SQL = <<~SQL.freeze
