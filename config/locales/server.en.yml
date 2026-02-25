@@ -2,4 +2,8 @@ en:
   site_settings:
     discourse_no_likes_enabled: "Enable discourse-no-likes"
     no_reactions_category_ids: "Categories where reactions are phantom (shown but not counted in stats)"
+    dislike_hide_like_button: "Hide the like/reaction button entirely in restricted categories"
+    dislike_count_in_leaderboard: "Count phantom likes in user stats (likes_given / likes_received) for leaderboards"
+    dislike_show_in_history: "Show phantom likes in user activity history feeds"
+    dislike_allowed_like_groups: "Only these groups can like in restricted categories (empty = everyone)"
     purge_phantom_likes_now: "Retroactively clear phantom likes — recalculates stats for all affected users (resets automatically after running)"

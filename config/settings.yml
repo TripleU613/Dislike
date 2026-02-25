@@ -5,6 +5,16 @@ plugins:
   no_reactions_category_ids:
     default: ""
     type: category_list
+  dislike_hide_like_button:
+    default: false
+  dislike_count_in_leaderboard:
+    default: false
+  dislike_show_in_history:
+    default: false
+  dislike_allowed_like_groups:
+    default: ""
+    type: group_list
+    allow_any: true
   purge_phantom_likes_now:
     default: false
     type: bool

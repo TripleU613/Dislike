@@ -3,7 +3,7 @@
 # name: dislike
 # about: Phantom reactions in selected categories — visible in UI, zero stat impact
 # meta_topic_id: TODO
-# version: 0.2.0
+# version: 0.3.0
 # authors: TripleU
 # url: https://github.com/TripleU613/Dislike
 # required_version: 2.7.0
@@ -50,15 +50,31 @@ end
 require_relative "lib/discourse_no_likes/engine"
 
 after_initialize do
-  # ── How Discourse tracks likes ──────────────────────────────────────────────
-  # UserActionManager.post_action_created calls UserAction.log_action!(row)
-  # which creates a UserAction record (activity/history) and calls
-  # update_like_count (increments user_stats.likes_given/received).
-  # We skip log_action! entirely for phantom likes — no record, no stats.
-  # PostAction (the actual like) is still created so the UI count works.
+  # ── Guardian override: hide button + group gate ────────────────────────────
+  # - dislike_hide_like_button=true → button hidden, backend rejects
+  # - dislike_allowed_like_groups set → only members can see/click
+  # discourse-reactions delegates to post_can_act?(post, :like) so it's covered
+  Guardian.prepend(
+    Module.new do
+      def post_can_act?(post, action_key, opts: {}, can_see_post: nil)
+        if action_key == :like && DiscourseNoLikes.restricted?(post)
+          return false if SiteSetting.dislike_hide_like_button
+          allowed = SiteSetting.dislike_allowed_like_groups
+          if allowed.present? && @user.present?
+            return false unless @user.in_any_groups?(SiteSetting.dislike_allowed_like_groups_map)
+          end
+        end
+        super
+      end
+    end,
+  )
 
-  # ── 1. Skip UserAction.log_action! for phantom likes ───────────────────────
-  # No UserAction record = no history entry, no stat update, no badge trigger.
+  # ── UserAction.log_action! — conditional based on settings ─────────────────
+  # For a phantom like in a restricted category:
+  #   show_in_history=true  AND count_in_leaderboard=true  → call super (normal)
+  #   show_in_history=true  AND count_in_leaderboard=false → call super, skip stats
+  #   show_in_history=false AND count_in_leaderboard=true  → skip super, update stats directly
+  #   show_in_history=false AND count_in_leaderboard=false → skip entirely (original behavior)
   UserAction.singleton_class.prepend(
     Module.new do
       def log_action!(hash)
@@ -66,34 +82,90 @@ after_initialize do
           restricted = DiscourseNoLikes.restricted_category_ids
           if restricted.any?
             topic = Topic.find_by(id: hash[:target_topic_id])
-            return if topic && restricted.include?(topic.category_id)
+            if topic && restricted.include?(topic.category_id)
+              show_hist = SiteSetting.dislike_show_in_history
+              count_stats = SiteSetting.dislike_count_in_leaderboard
+
+              if show_hist && count_stats
+                # Normal behavior — both history and stats
+                return super(hash)
+              elsif show_hist && !count_stats
+                # History yes, stats no — set thread-local flag to skip update_like_count
+                Thread.current[:dnl_skip_stats] = true
+                begin
+                  return super(hash)
+                ensure
+                  Thread.current[:dnl_skip_stats] = nil
+                end
+              elsif !show_hist && count_stats
+                # No history, but update stats directly
+                _dnl_update_stats_only(hash)
+                return
+              else
+                # Fully phantom — skip everything (original behavior)
+                return
+              end
+            end
           end
         end
         super(hash)
       end
-    end,
-  )
 
-  # ── 2. Skip UserAction.remove_action! for phantom unlikes ──────────────────
-  # Since we never created the UserAction, there's nothing to remove or decrement.
-  UserAction.singleton_class.prepend(
-    Module.new do
+      def update_like_count(user_id, action_type, delta)
+        return if Thread.current[:dnl_skip_stats]
+        super
+      end
+
       def remove_action!(hash)
         if [UserAction::LIKE, UserAction::WAS_LIKED].include?(hash[:action_type])
           restricted = DiscourseNoLikes.restricted_category_ids
           if restricted.any?
-            return if Topic.where(
-              id: hash[:target_topic_id],
-              category_id: restricted,
-            ).exists?
+            topic = Topic.find_by(id: hash[:target_topic_id])
+            if topic && restricted.include?(topic.category_id)
+              show_hist = SiteSetting.dislike_show_in_history
+              count_stats = SiteSetting.dislike_count_in_leaderboard
+
+              if show_hist && count_stats
+                return super(hash)
+              elsif show_hist && !count_stats
+                Thread.current[:dnl_skip_stats] = true
+                begin
+                  return super(hash)
+                ensure
+                  Thread.current[:dnl_skip_stats] = nil
+                end
+              elsif !show_hist && count_stats
+                _dnl_update_stats_only(hash, delta: -1)
+                return
+              else
+                return
+              end
+            end
           end
         end
         super(hash)
       end
+
+      private
+
+      def _dnl_update_stats_only(hash, delta: 1)
+        # Mirror Discourse's update_like_count exactly:
+        #   LIKE      → hash[:user_id] is the liker   → likes_given
+        #   WAS_LIKED → hash[:user_id] is the author  → likes_received
+        if hash[:action_type] == UserAction::LIKE
+          UserStat.where(user_id: hash[:user_id]).update_all(
+            "likes_given = GREATEST(0, likes_given + (#{delta}))",
+          )
+        elsif hash[:action_type] == UserAction::WAS_LIKED
+          UserStat.where(user_id: hash[:user_id]).update_all(
+            "likes_received = GREATEST(0, likes_received + (#{delta}))",
+          )
+        end
+      end
     end,
   )
 
-  # ── 4. Audit trail + suppress "liked" notification ───────────────────────────
+  # ── Audit trail + suppress "liked" notification ───────────────────────────
   on(:post_action_created) do |post_action|
     next unless post_action.post_action_type_id == PostActionType.types[:like]
     next unless (post = post_action.post)
@@ -106,18 +178,21 @@ after_initialize do
       reaction_type: "like",
     )
 
-    Notification
-      .where(
-        user_id: post.user_id,
-        notification_type: Notification.types[:liked],
-        topic_id: post.topic_id,
-        post_number: post.post_number,
-      )
-      .where("created_at >= ?", 30.seconds.ago)
-      .destroy_all
+    # Only suppress notification if history is disabled
+    unless SiteSetting.dislike_show_in_history
+      Notification
+        .where(
+          user_id: post.user_id,
+          notification_type: Notification.types[:liked],
+          topic_id: post.topic_id,
+          post_number: post.post_number,
+        )
+        .where("created_at >= ?", 30.seconds.ago)
+        .destroy_all
+    end
   end
 
-  # ── 5. discourse-reactions: record non-heart emoji reactions ─────────────────
+  # ── discourse-reactions: record non-heart emoji reactions ─────────────────
   if defined?(DiscourseReactions::ReactionUser)
     DiscourseReactions::ReactionUser.class_eval do
       after_create :dnl_record_phantom_emoji
@@ -140,10 +215,7 @@ after_initialize do
     end
   end
 
-  # ── 6. Retroactive purge trigger ─────────────────────────────────────────────
-  # Toggle "purge_phantom_likes_now" in Admin → Settings → Plugins to kick off
-  # a background job that recalculates stats for all affected users.
-  # The setting resets to false automatically after enqueuing.
+  # ── Retroactive purge trigger ─────────────────────────────────────────────
   on(:site_setting_changed) do |name, _old, new_val|
     if name == :purge_phantom_likes_now && new_val == true
       Jobs.enqueue(:purge_phantom_reactions)
