@@ -79,8 +79,25 @@ module Jobs
         )
       end
 
+      # 4. Delete UserAction history entries for likes in restricted categories.
+      #    WAS_LIKED (2) = appears in the post author's activity history
+      #    LIKE      (1) = appears in the liker's activity history
+      DB.exec(<<~SQL)
+        DELETE FROM user_actions
+         WHERE action_type IN (#{UserAction::LIKE}, #{UserAction::WAS_LIKED})
+           AND target_post_id IN (
+             SELECT pa.post_id
+               FROM post_actions pa
+               JOIN posts  p ON p.id = pa.post_id AND p.deleted_at IS NULL
+               JOIN topics t ON t.id = p.topic_id AND t.deleted_at IS NULL
+              WHERE pa.post_action_type_id = #{like_type}
+                AND pa.deleted_at IS NULL
+                AND t.category_id IN (#{restricted_str})
+           )
+      SQL
+
       Rails.logger.info(
-        "DiscourseNoLikes: purge complete — recalculated stats for #{affected_ids.size} users",
+        "DiscourseNoLikes: purge complete — recalculated stats for #{affected_ids.size} users, cleared history",
       )
     end
   end
