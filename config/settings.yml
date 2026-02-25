@@ -1,0 +1,7 @@
+plugins:
+  discourse_no_likes_enabled:
+    default: true
+    client: false
+  no_reactions_category_ids:
+    default: ""
+    type: category_list
