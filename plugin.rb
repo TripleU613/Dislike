@@ -50,59 +50,44 @@ end
 require_relative "lib/discourse_no_likes/engine"
 
 after_initialize do
-  # ── How stat updates actually work in this Discourse version ─────────────────
-  # UserAction.log! is called when a like is created/destroyed.
-  # It calls UserAction.update_like_count(user_id, action_type, delta) which does
-  # raw SQL increments on user_stats.likes_given / likes_received.
-  # We intercept log! and remove_action! to set a thread-local flag, then gate
-  # update_like_count on that flag — so restricted-category likes never touch stats.
+  # ── How Discourse tracks likes ──────────────────────────────────────────────
+  # UserAction.log! creates a UserAction record (shows in activity/history feed)
+  # AND calls update_like_count which increments user_stats.likes_given/received.
+  # We skip log! entirely for phantom likes — no record, no stats, no history.
+  # PostAction (the actual like) is still created so the UI count works.
 
-  # ── 1. Gate update_like_count with a thread-local flag ───────────────────────
-  UserAction.singleton_class.prepend(
-    Module.new do
-      def update_like_count(user_id, action_type, delta)
-        return if Thread.current[:dnl_skip_like_stat]
-        super
-      end
-    end,
-  )
-
-  # ── 2. Set the flag in log! (like created) ───────────────────────────────────
+  # ── 1. Skip UserAction.log! entirely for phantom likes ─────────────────────
+  # No UserAction record = no history entry, no stat update, no badge trigger.
   UserAction.singleton_class.prepend(
     Module.new do
       def log!(hash, transaction_opts = {})
-        is_like = [UserAction::LIKE, UserAction::WAS_LIKED].include?(hash[:action_type])
-        if is_like && DiscourseNoLikes.restricted_category_ids.any?
-          topic = Topic.find_by(id: hash[:target_topic_id])
-          Thread.current[:dnl_skip_like_stat] =
-            topic && DiscourseNoLikes.restricted_category_ids.include?(topic.category_id)
+        if [UserAction::LIKE, UserAction::WAS_LIKED].include?(hash[:action_type])
+          restricted = DiscourseNoLikes.restricted_category_ids
+          if restricted.any?
+            topic = Topic.find_by(id: hash[:target_topic_id])
+            return if topic && restricted.include?(topic.category_id)
+          end
         end
         super(hash, transaction_opts)
-      ensure
-        Thread.current[:dnl_skip_like_stat] = nil if is_like
       end
     end,
   )
 
-  # ── 3. Set the flag in remove_action! (like removed / unlike) ────────────────
-  # Without this, unliking a phantom like would decrement stats that were never
-  # incremented, sending them negative.
+  # ── 2. Skip UserAction.remove_action! for phantom unlikes ──────────────────
+  # Since we never created the UserAction, there's nothing to remove or decrement.
   UserAction.singleton_class.prepend(
     Module.new do
       def remove_action!(hash)
-        is_like = [UserAction::LIKE, UserAction::WAS_LIKED].include?(hash[:action_type])
-        if is_like && DiscourseNoLikes.restricted_category_ids.any?
-          Thread.current[:dnl_skip_like_stat] =
-            Topic
-              .where(
-                id: hash[:target_topic_id],
-                category_id: DiscourseNoLikes.restricted_category_ids,
-              )
-              .exists?
+        if [UserAction::LIKE, UserAction::WAS_LIKED].include?(hash[:action_type])
+          restricted = DiscourseNoLikes.restricted_category_ids
+          if restricted.any?
+            return if Topic.where(
+              id: hash[:target_topic_id],
+              category_id: restricted,
+            ).exists?
+          end
         end
         super(hash)
-      ensure
-        Thread.current[:dnl_skip_like_stat] = nil if is_like
       end
     end,
   )
