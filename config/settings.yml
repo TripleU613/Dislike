@@ -5,3 +5,6 @@ plugins:
   no_reactions_category_ids:
     default: ""
     type: category_list
+  purge_phantom_likes_now:
+    default: false
+    type: bool

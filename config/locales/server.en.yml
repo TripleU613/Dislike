@@ -1,4 +1,5 @@
 en:
   site_settings:
     discourse_no_likes_enabled: "Enable discourse-no-likes"
-    no_reactions_category_ids: "Categories where reactions are phantom (visible but not counted in stats)"
+    no_reactions_category_ids: "Categories where reactions are phantom (shown but not counted in stats)"
+    purge_phantom_likes_now: "Retroactively clear phantom likes — recalculates stats for all affected users (resets automatically after running)"
