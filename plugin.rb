@@ -51,16 +51,17 @@ require_relative "lib/discourse_no_likes/engine"
 
 after_initialize do
   # ── How Discourse tracks likes ──────────────────────────────────────────────
-  # UserAction.log! creates a UserAction record (shows in activity/history feed)
-  # AND calls update_like_count which increments user_stats.likes_given/received.
-  # We skip log! entirely for phantom likes — no record, no stats, no history.
+  # UserActionManager.post_action_created calls UserAction.log_action!(row)
+  # which creates a UserAction record (activity/history) and calls
+  # update_like_count (increments user_stats.likes_given/received).
+  # We skip log_action! entirely for phantom likes — no record, no stats.
   # PostAction (the actual like) is still created so the UI count works.
 
-  # ── 1. Skip UserAction.log! entirely for phantom likes ─────────────────────
+  # ── 1. Skip UserAction.log_action! for phantom likes ───────────────────────
   # No UserAction record = no history entry, no stat update, no badge trigger.
   UserAction.singleton_class.prepend(
     Module.new do
-      def log!(hash, transaction_opts = {})
+      def log_action!(hash)
         if [UserAction::LIKE, UserAction::WAS_LIKED].include?(hash[:action_type])
           restricted = DiscourseNoLikes.restricted_category_ids
           if restricted.any?
@@ -68,7 +69,7 @@ after_initialize do
             return if topic && restricted.include?(topic.category_id)
           end
         end
-        super(hash, transaction_opts)
+        super(hash)
       end
     end,
   )
